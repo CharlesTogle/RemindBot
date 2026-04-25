@@ -23,6 +23,22 @@ const VIEW_PAGE_SIZE = 10;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+async function withRetry(fn, { retries = 3, delayMs = 1000 } = {}) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const status = err?.status ?? err?.httpStatus;
+      if (status === 502 && attempt < retries) {
+        console.warn(`[remind-bot] 502 from Discord, retrying (${attempt}/${retries})...`);
+        await new Promise((res) => setTimeout(res, delayMs * attempt));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 function manilaDate(date = new Date()) {
   return new Intl.DateTimeFormat("en-PH", {
     timeZone: TIMEZONE,
@@ -91,7 +107,7 @@ async function sendReminderMessage(channel, message, mention = "@everyone") {
     payload.embeds = [{ image: { url: gifUrl } }];
   }
 
-  await channel.send(payload);
+  await withRetry(() => channel.send(payload));
 }
 
 function formatReminderRow(row) {
@@ -217,9 +233,11 @@ async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
   for (const guildId of COMMAND_GUILD_IDS) {
     try {
-      await rest.put(Routes.applicationGuildCommands(DISCORD_CLIENT_ID, guildId), {
-        body: commands.map((c) => c.toJSON()),
-      });
+      await withRetry(() =>
+        rest.put(Routes.applicationGuildCommands(DISCORD_CLIENT_ID, guildId), {
+          body: commands.map((c) => c.toJSON()),
+        })
+      );
       console.log(`[remind-bot] Commands registered in guild ${guildId}`);
     } catch (err) {
       if (err?.code === 50001) {
