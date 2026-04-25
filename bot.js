@@ -372,9 +372,9 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("delete")
-    .setDescription("Delete a reminder by ID")
-    .addIntegerOption((opt) =>
-      opt.setName("id").setDescription("Reminder ID from /view").setRequired(true)
+    .setDescription("Delete one or more reminders by ID")
+    .addStringOption((opt) =>
+      opt.setName("ids").setDescription("Reminder ID(s) from /view, comma-separated (e.g. 4,5,6)").setRequired(true)
     ),
 ];
 
@@ -447,16 +447,36 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (interaction.commandName === "delete") {
-    const id = interaction.options.getInteger("id", true);
-    const result = deleteReminder(id, interaction.guildId);
-    if (result.changes) {
-      removeFromScheduler(id);
+    const raw = interaction.options.getString("ids", true);
+    const parts = raw.split(",").map((s) => s.trim());
+    const ids = parts.map((s) => (s !== "" && /^\d+$/.test(s) ? parseInt(s, 10) : null));
+
+    if (ids.some((id) => id === null)) {
+      await safeReply(interaction, {
+        content: `Invalid input \`${raw}\`. Provide only integers separated by commas (e.g. \`4,5,6\`).`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
     }
 
+    const deleted = [];
+    const notFound = [];
+    for (const id of ids) {
+      const result = deleteReminder(id, interaction.guildId);
+      if (result.changes) {
+        removeFromScheduler(id);
+        deleted.push(id);
+      } else {
+        notFound.push(id);
+      }
+    }
+
+    const lines = [];
+    if (deleted.length) lines.push(`Deleted: ${deleted.map((id) => `\`${id}\``).join(", ")}`);
+    if (notFound.length) lines.push(`Not found: ${notFound.map((id) => `\`${id}\``).join(", ")}`);
+
     await safeReply(interaction, {
-      content: result.changes
-        ? `Reminder \`${id}\` deleted.`
-        : `No reminder found with ID \`${id}\` in this server.`,
+      content: lines.join("\n"),
       flags: MessageFlags.Ephemeral,
     });
     return;
