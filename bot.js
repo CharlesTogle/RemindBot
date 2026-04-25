@@ -15,11 +15,91 @@ import {
   SEND_CHANNEL_ID,
   TIMEZONE,
 } from "./config.js";
-import { addReminder, deleteReminder, deleteReminderById, deleteSentReminders, getActiveReminders, getDueReminders, reschedule } from "./db.js";
+import {
+  addReminder,
+  deleteReminder,
+  deleteReminderById,
+  getActiveReminders,
+  getAllActiveReminders,
+  getReminderById,
+  reschedule,
+} from "./db.js";
 import { fetchMobGif } from "./gifs.js";
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const VIEW_PAGE_SIZE = 10;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_TIMEOUT_MS = 2_147_483_647;
+const RETRY_DELAY_MS = 60_000;
+
+class MinHeap {
+  constructor(compare) {
+    this.compare = compare;
+    this.items = [];
+  }
+
+  peek() {
+    return this.items[0] ?? null;
+  }
+
+  push(value) {
+    this.items.push(value);
+    this.bubbleUp(this.items.length - 1);
+  }
+
+  pop() {
+    if (this.items.length === 0) return null;
+    const first = this.items[0];
+    const last = this.items.pop();
+    if (this.items.length > 0) {
+      this.items[0] = last;
+      this.sinkDown(0);
+    }
+    return first;
+  }
+
+  bubbleUp(index) {
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (this.compare(this.items[index], this.items[parent]) >= 0) break;
+      [this.items[index], this.items[parent]] = [this.items[parent], this.items[index]];
+      index = parent;
+    }
+  }
+
+  sinkDown(index) {
+    const { items } = this;
+
+    while (true) {
+      let smallest = index;
+      const left = index * 2 + 1;
+      const right = index * 2 + 2;
+
+      if (left < items.length && this.compare(items[left], items[smallest]) < 0) {
+        smallest = left;
+      }
+      if (right < items.length && this.compare(items[right], items[smallest]) < 0) {
+        smallest = right;
+      }
+      if (smallest === index) break;
+
+      [items[index], items[smallest]] = [items[smallest], items[index]];
+      index = smallest;
+    }
+  }
+}
+
+const reminderHeap = new MinHeap((a, b) => {
+  if (a.remind_at !== b.remind_at) {
+    return a.remind_at - b.remind_at;
+  }
+  return a.id - b.id;
+});
+
+const deletedReminderIds = new Set();
+let scheduledReminderId = null;
+let scheduledFireTime = null;
+let schedulerTimer = null;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -168,11 +248,66 @@ async function replyWithReminderPages(interaction, rows) {
   }
 }
 
-function cleanupSentReminderRecords() {
-  const result = deleteSentReminders();
-  if (result.changes > 0) {
-    console.log(`[remind-bot] Deleted ${result.changes} sent reminder(s) from storage`);
+function clearSchedulerTimer() {
+  if (schedulerTimer) {
+    clearTimeout(schedulerTimer);
+    schedulerTimer = null;
   }
+  scheduledReminderId = null;
+  scheduledFireTime = null;
+}
+
+function pruneDeletedReminders() {
+  while (true) {
+    const nextReminder = reminderHeap.peek();
+    if (!nextReminder || !deletedReminderIds.has(nextReminder.id)) {
+      return;
+    }
+
+    reminderHeap.pop();
+    deletedReminderIds.delete(nextReminder.id);
+  }
+}
+
+function scheduleNextReminder() {
+  clearSchedulerTimer();
+  pruneDeletedReminders();
+
+  const nextReminder = reminderHeap.peek();
+  if (!nextReminder) return;
+
+  scheduledReminderId = nextReminder.id;
+  scheduledFireTime = nextReminder.remind_at;
+
+  const delay = Math.max(0, nextReminder.remind_at - Date.now());
+  schedulerTimer = setTimeout(fireNextReminders, Math.min(delay, MAX_TIMEOUT_MS));
+}
+
+function addToScheduler(reminder) {
+  reminderHeap.push(reminder);
+
+  const currentTop = reminderHeap.peek();
+  if (
+    currentTop &&
+    (scheduledReminderId === null ||
+      currentTop.id !== scheduledReminderId ||
+      currentTop.remind_at !== scheduledFireTime)
+  ) {
+    scheduleNextReminder();
+  }
+}
+
+function removeFromScheduler(id) {
+  deletedReminderIds.add(id);
+  scheduleNextReminder();
+}
+
+function getNextRecurringTime(remindAt, now = Date.now()) {
+  let next = remindAt + DAY_MS;
+  while (next <= now) {
+    next += DAY_MS;
+  }
+  return next;
 }
 
 // ── slash commands ────────────────────────────────────────────────────────────
@@ -300,6 +435,9 @@ client.on("interactionCreate", async (interaction) => {
   if (interaction.commandName === "delete") {
     const id = interaction.options.getInteger("id", true);
     const result = deleteReminder(id, interaction.guildId);
+    if (result.changes) {
+      removeFromScheduler(id);
+    }
 
     await interaction.reply({
       content: result.changes
@@ -355,7 +493,7 @@ client.on("interactionCreate", async (interaction) => {
 
     const mentionId = whoUser ? whoUser.id : "everyone";
 
-    addReminder({
+    const result = addReminder({
       guild_id: interaction.guildId,
       channel_id: SEND_CHANNEL_ID,
       created_by: interaction.user.id,
@@ -364,6 +502,17 @@ client.on("interactionCreate", async (interaction) => {
       remind_at: remindAt,
       recurring,
       bomb,
+    });
+    addToScheduler({
+      id: Number(result.lastInsertRowid),
+      guild_id: interaction.guildId,
+      channel_id: SEND_CHANNEL_ID,
+      created_by: interaction.user.id,
+      mention_id: mentionId,
+      reminder,
+      remind_at: remindAt,
+      recurring: recurring ? 1 : 0,
+      bomb: bomb ? 1 : 0,
     });
 
     const mentionLabel = whoUser ? `<@${whoUser.id}>` : "@everyone";
@@ -384,28 +533,57 @@ client.on("interactionCreate", async (interaction) => {
 
 // ── scheduler ─────────────────────────────────────────────────────────────────
 
-async function checkReminders() {
-  cleanupSentReminderRecords();
-  const due = getDueReminders();
-  for (const row of due) {
-    try {
-      const channel = await fetchSendChannel();
+async function fireNextReminders() {
+  clearSchedulerTimer();
+  pruneDeletedReminders();
 
-      const mention = formatMention(row.mention_id);
-      const times = row.bomb ? 5 : 1;
+  try {
+    const channel = await fetchSendChannel();
 
-      for (let i = 0; i < times; i++) {
-        await sendReminderMessage(channel, row.reminder, mention);
+    while (true) {
+      pruneDeletedReminders();
+
+      const nextReminder = reminderHeap.peek();
+      if (!nextReminder || nextReminder.remind_at > Date.now()) {
+        break;
       }
 
-      if (row.recurring) {
-        reschedule(row.id, row.remind_at + 24 * 60 * 60 * 1000);
-      } else {
-        deleteReminderById(row.id);
+      const queuedReminder = reminderHeap.pop();
+      const row = getReminderById(queuedReminder.id);
+      if (!row) {
+        deletedReminderIds.delete(queuedReminder.id);
+        continue;
       }
-    } catch (err) {
-      console.error(`[remind-bot] Failed to fire reminder ${row.id}:`, err.message);
+
+      try {
+        const mention = formatMention(row.mention_id);
+        const times = row.bomb ? 5 : 1;
+
+        for (let i = 0; i < times; i++) {
+          await sendReminderMessage(channel, row.reminder, mention);
+        }
+
+        if (row.recurring) {
+          const nextRemindAt = getNextRecurringTime(row.remind_at);
+          reschedule(row.id, nextRemindAt);
+          reminderHeap.push({ ...row, remind_at: nextRemindAt });
+        } else {
+          deleteReminderById(row.id);
+        }
+      } catch (err) {
+        reminderHeap.push({ ...row, remind_at: Date.now() + RETRY_DELAY_MS });
+        console.error(`[remind-bot] Failed to fire reminder ${row.id}:`, err.message);
+      }
     }
+  } catch (err) {
+    const nextReminder = reminderHeap.peek();
+    if (nextReminder && nextReminder.remind_at <= Date.now()) {
+      nextReminder.remind_at = Date.now() + RETRY_DELAY_MS;
+      reminderHeap.sinkDown(0);
+    }
+    console.error("[remind-bot] Scheduler loop failed:", err.message);
+  } finally {
+    scheduleNextReminder();
   }
 }
 
@@ -415,9 +593,10 @@ client.once("clientReady", async () => {
   console.log(`[remind-bot] Online as ${client.user.tag}`);
   try {
     await registerCommands();
-    cleanupSentReminderRecords();
-    checkReminders();
-    setInterval(checkReminders, 60_000);
+    for (const reminder of getAllActiveReminders()) {
+      reminderHeap.push(reminder);
+    }
+    scheduleNextReminder();
   } catch (err) {
     console.error("[remind-bot] Startup failed:", err);
     client.destroy();

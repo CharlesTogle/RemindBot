@@ -29,10 +29,16 @@ export function addReminder({ guild_id, channel_id, created_by, mention_id, remi
     .run(guild_id, channel_id, created_by, mention_id, reminder, remind_at, recurring ? 1 : 0, bomb ? 1 : 0);
 }
 
-export function getDueReminders() {
+export function getAllActiveReminders() {
   return db
-    .prepare(`SELECT * FROM reminders WHERE remind_at <= ? AND sent = 0`)
-    .all(Date.now());
+    .prepare(`SELECT * FROM reminders ORDER BY remind_at ASC`)
+    .all();
+}
+
+export function getReminderById(id) {
+  return db
+    .prepare(`SELECT * FROM reminders WHERE id = ?`)
+    .get(id);
 }
 
 export function getActiveReminders(guild_id, created_by = null) {
@@ -40,7 +46,7 @@ export function getActiveReminders(guild_id, created_by = null) {
     return db
       .prepare(
         `SELECT * FROM reminders
-         WHERE guild_id = ? AND created_by = ? AND sent = 0
+         WHERE guild_id = ? AND created_by = ?
          ORDER BY remind_at ASC`
       )
       .all(guild_id, created_by);
@@ -49,7 +55,7 @@ export function getActiveReminders(guild_id, created_by = null) {
   return db
     .prepare(
       `SELECT * FROM reminders
-       WHERE guild_id = ? AND sent = 0
+       WHERE guild_id = ?
        ORDER BY remind_at ASC`
     )
     .all(guild_id);
@@ -62,13 +68,9 @@ export function deleteReminder(id, guild_id) {
 }
 
 export function deleteReminderById(id) {
-  db.prepare(`DELETE FROM reminders WHERE id = ?`).run(id);
-}
-
-export function deleteSentReminders() {
-  return db.prepare(`DELETE FROM reminders WHERE sent = 1`).run();
+  return db.prepare(`DELETE FROM reminders WHERE id = ?`).run(id);
 }
 
 export function reschedule(id, nextRemindAt) {
-  db.prepare(`UPDATE reminders SET remind_at = ?, sent = 0 WHERE id = ?`).run(nextRemindAt, id);
+  return db.prepare(`UPDATE reminders SET remind_at = ? WHERE id = ?`).run(nextRemindAt, id);
 }
