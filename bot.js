@@ -407,4 +407,17 @@ client.once("clientReady", async () => {
   }
 });
 
+client.on("error", (err) => {
+  console.error("[remind-bot] Client error:", err.message);
+});
+
+client.on("shardError", (err) => {
+  console.error("[remind-bot] WebSocket error:", err.message);
+});
+
+process.on("unhandledRejection", (err) => {
+  console.error("[remind-bot] Unhandled rejection:", err);
+  process.exit(1);
+});
+
 client.login(DISCORD_TOKEN);

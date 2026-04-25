@@ -17,3 +17,7 @@ yarn-debug.log*
 yarn-error.log*
 
 .DS_Store
+.claude
+.codex
+CLAUDE.md
+AGENTS.md
