@@ -20,13 +20,56 @@ db.exec(`
   )
 `);
 
-export function addReminder({ guild_id, channel_id, created_by, mention_id, reminder, remind_at, recurring, bomb }) {
+const columns = db.prepare(`PRAGMA table_info(reminders)`).all();
+const hasSourceInteractionId = columns.some((column) => column.name === "source_interaction_id");
+
+if (!hasSourceInteractionId) {
+  db.exec(`ALTER TABLE reminders ADD COLUMN source_interaction_id TEXT`);
+}
+
+db.exec(`
+  CREATE UNIQUE INDEX IF NOT EXISTS reminders_source_interaction_id_unique
+  ON reminders(source_interaction_id)
+`);
+
+export function addReminder({
+  guild_id,
+  channel_id,
+  created_by,
+  mention_id,
+  reminder,
+  remind_at,
+  recurring,
+  bomb,
+  source_interaction_id,
+}) {
   return db
     .prepare(
-      `INSERT INTO reminders (guild_id, channel_id, created_by, mention_id, reminder, remind_at, recurring, bomb)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO reminders (
+         guild_id,
+         channel_id,
+         created_by,
+         mention_id,
+         reminder,
+         remind_at,
+         recurring,
+         bomb,
+         source_interaction_id
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(source_interaction_id) DO NOTHING`
     )
-    .run(guild_id, channel_id, created_by, mention_id, reminder, remind_at, recurring ? 1 : 0, bomb ? 1 : 0);
+    .run(
+      guild_id,
+      channel_id,
+      created_by,
+      mention_id,
+      reminder,
+      remind_at,
+      recurring ? 1 : 0,
+      bomb ? 1 : 0,
+      source_interaction_id
+    );
 }
 
 export function getAllActiveReminders() {

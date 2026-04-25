@@ -190,6 +190,20 @@ async function sendReminderMessage(channel, message, mention = "@everyone") {
   await withRetry(() => channel.send(payload));
 }
 
+async function safeReply(interaction, payload) {
+  try {
+    await interaction.reply(payload);
+  } catch (err) {
+    if (err?.code === 40060 || err?.code === 10062) {
+      console.warn(
+        `[remind-bot] Ignoring duplicate interaction reply for ${interaction.id}: ${err.code}`
+      );
+      return;
+    }
+    throw err;
+  }
+}
+
 function formatReminderRow(row) {
   return [
     `**ID:** \`${row.id}\``,
@@ -400,7 +414,7 @@ client.on("interactionCreate", async (interaction) => {
   if (interaction.type !== InteractionType.ApplicationCommand) return;
 
   if (interaction.commandName === "clock") {
-    await interaction.reply({
+    await safeReply(interaction, {
       content: `Current time: **${manilaDate()}** (Asia/Manila)`,
       flags: MessageFlags.Ephemeral,
     });
@@ -411,7 +425,7 @@ client.on("interactionCreate", async (interaction) => {
     const canViewAll = interaction.user.id === PRIVILEGED_VIEWER_ID;
     const rows = getActiveReminders(interaction.guildId, canViewAll ? null : interaction.user.id);
     if (!rows.length) {
-      await interaction.reply({
+      await safeReply(interaction, {
         content: canViewAll
           ? "No active reminders found for this server."
           : "You have no active reminders in this server.",
@@ -425,7 +439,7 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    await interaction.reply({
+    await safeReply(interaction, {
       content: rows.map((row) => formatReminderRow(row)).join("\n\n"),
       flags: MessageFlags.Ephemeral,
     });
@@ -439,7 +453,7 @@ client.on("interactionCreate", async (interaction) => {
       removeFromScheduler(id);
     }
 
-    await interaction.reply({
+    await safeReply(interaction, {
       content: result.changes
         ? `Reminder \`${id}\` deleted.`
         : `No reminder found with ID \`${id}\` in this server.`,
@@ -452,7 +466,7 @@ client.on("interactionCreate", async (interaction) => {
     const bomb = interaction.options.getBoolean("bomb") ?? false;
     const times = bomb ? 5 : 1;
     const sendChannel = await fetchSendChannel();
-    await interaction.reply({
+    await safeReply(interaction, {
       content: `Firing test reminder in <#${SEND_CHANNEL_ID}>...`,
       flags: MessageFlags.Ephemeral,
     });
@@ -473,21 +487,33 @@ client.on("interactionCreate", async (interaction) => {
     const announce = interaction.options.getBoolean("announce") ?? false;
 
     if (!/^\d{2}:\d{2}$/.test(timeStr)) {
-      await interaction.reply({ content: "Invalid time. Use HH:MM (24h).", flags: MessageFlags.Ephemeral });
+      await safeReply(interaction, {
+        content: "Invalid time. Use HH:MM (24h).",
+        flags: MessageFlags.Ephemeral,
+      });
       return;
     }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-      await interaction.reply({ content: "Invalid date. Use YYYY-MM-DD.", flags: MessageFlags.Ephemeral });
+      await safeReply(interaction, {
+        content: "Invalid date. Use YYYY-MM-DD.",
+        flags: MessageFlags.Ephemeral,
+      });
       return;
     }
 
     const remindAt = manilaToUtcMs(dateStr, timeStr);
     if (isNaN(remindAt)) {
-      await interaction.reply({ content: "Could not parse date/time.", flags: MessageFlags.Ephemeral });
+      await safeReply(interaction, {
+        content: "Could not parse date/time.",
+        flags: MessageFlags.Ephemeral,
+      });
       return;
     }
     if (remindAt <= Date.now()) {
-      await interaction.reply({ content: "That time is already in the past.", flags: MessageFlags.Ephemeral });
+      await safeReply(interaction, {
+        content: "That time is already in the past.",
+        flags: MessageFlags.Ephemeral,
+      });
       return;
     }
 
@@ -502,7 +528,16 @@ client.on("interactionCreate", async (interaction) => {
       remind_at: remindAt,
       recurring,
       bomb,
+      source_interaction_id: interaction.id,
     });
+    if (!result.changes) {
+      await safeReply(interaction, {
+        content: "This reminder command was already processed.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
     addToScheduler({
       id: Number(result.lastInsertRowid),
       guild_id: interaction.guildId,
@@ -517,7 +552,7 @@ client.on("interactionCreate", async (interaction) => {
 
     const mentionLabel = whoUser ? `<@${whoUser.id}>` : "@everyone";
 
-    await interaction.reply({
+    await safeReply(interaction, {
       content: [
         `Okay, Im reminding you on ${dateStr} at ${timeStr} that **${reminder}**`,
         `Mentions: ${mentionLabel}`,
