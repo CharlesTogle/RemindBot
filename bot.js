@@ -288,12 +288,16 @@ function scheduleNextReminder() {
   pruneDeletedReminders();
 
   const nextReminder = reminderHeap.peek();
-  if (!nextReminder) return;
+  if (!nextReminder) {
+    console.log("[scheduler] scheduleNextReminder: heap empty, no timer set");
+    return;
+  }
 
   scheduledReminderId = nextReminder.id;
   scheduledFireTime = nextReminder.remind_at;
 
   const delay = Math.max(0, nextReminder.remind_at - Date.now());
+  console.log(`[scheduler] Timer set for reminder ID=${nextReminder.id}, fires in ${delay}ms (at ${new Date(nextReminder.remind_at).toISOString()})`);
   schedulerTimer = setTimeout(fireNextReminders, Math.min(delay, MAX_TIMEOUT_MS));
 }
 
@@ -589,6 +593,7 @@ client.on("interactionCreate", async (interaction) => {
 // ── scheduler ─────────────────────────────────────────────────────────────────
 
 async function fireNextReminders() {
+  console.log(`[scheduler] fireNextReminders called, heap size=${reminderHeap.items.length}`);
   clearSchedulerTimer();
   pruneDeletedReminders();
 
@@ -599,6 +604,7 @@ async function fireNextReminders() {
       pruneDeletedReminders();
 
       const nextReminder = reminderHeap.peek();
+      console.log(`[scheduler] loop peek: ${nextReminder ? `ID=${nextReminder.id} remind_at=${nextReminder.remind_at} now=${Date.now()} due=${nextReminder.remind_at <= Date.now()}` : "empty"}`);
       if (!nextReminder || nextReminder.remind_at > Date.now()) {
         break;
       }
@@ -648,7 +654,9 @@ client.once("clientReady", async () => {
   console.log(`[remind-bot] Online as ${client.user.tag}`);
   try {
     await registerCommands();
-    for (const reminder of getAllActiveReminders()) {
+    const startupReminders = getAllActiveReminders();
+    console.log(`[scheduler] Loaded ${startupReminders.length} reminder(s) from DB on startup`);
+    for (const reminder of startupReminders) {
       reminderHeap.push(reminder);
     }
     scheduleNextReminder();
