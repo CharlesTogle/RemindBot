@@ -3,7 +3,9 @@ const TENOR_KEY = "LIVDSRZULELA";
 const QUERIES = [
   "mob rage",
   "mob psycho 100 rage",
+  "mob rage 100%",
   "shigeo kageyama rage",
+  "mob psycho 100",
   "mob psycho 100 angry",
 ];
 
