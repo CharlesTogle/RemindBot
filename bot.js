@@ -13,6 +13,7 @@ import {
   COMMAND_GUILD_IDS,
   PRIVILEGED_VIEWER_ID,
   SEND_CHANNEL_ID,
+  ANNOUNCE_CHANNEL_ID,
   TIMEZONE,
 } from "./config.js";
 import {
@@ -190,6 +191,12 @@ async function sendReminderMessage(channel, message, mention = "@everyone") {
   await withRetry(() => channel.send(payload));
 }
 
+async function sendAnnouncementMessage(channel, message, mention = "@everyone", remindAt) {
+  const timestamp = remindAt ? `-# ${formatFireTime(remindAt)}` : "";
+  const content = [`${mention}`, `# ${message}`, timestamp].filter(Boolean).join("\n");
+  await withRetry(() => channel.send({ content }));
+}
+
 async function safeReply(interaction, payload) {
   try {
     await interaction.reply(payload);
@@ -361,6 +368,12 @@ const commands = [
         .setName("announce")
         .setDescription("Show the confirmation to everyone (default: false)")
         .setRequired(false)
+    )
+    .addBooleanOption((opt) =>
+      opt
+        .setName("announcement")
+        .setDescription("Post as a formatted announcement in the announcements channel (default: false)")
+        .setRequired(false)
     ),
 
   new SlashCommandBuilder()
@@ -404,10 +417,10 @@ async function registerCommands() {
   }
 }
 
-async function fetchSendChannel() {
-  const channel = await client.channels.fetch(SEND_CHANNEL_ID);
+async function fetchChannel(channelId) {
+  const channel = await client.channels.fetch(channelId);
   if (!channel?.isTextBased()) {
-    throw new Error(`Configured SEND_CHANNEL_ID ${SEND_CHANNEL_ID} is not a text channel`);
+    throw new Error(`Channel ${channelId} is not a text channel`);
   }
   return channel;
 }
@@ -489,7 +502,7 @@ client.on("interactionCreate", async (interaction) => {
   if (interaction.commandName === "test") {
     const bomb = interaction.options.getBoolean("bomb") ?? false;
     const times = bomb ? 5 : 1;
-    const sendChannel = await fetchSendChannel();
+    const sendChannel = await fetchChannel(SEND_CHANNEL_ID);
     await safeReply(interaction, {
       content: `Firing test reminder in <#${SEND_CHANNEL_ID}>...`,
       flags: MessageFlags.Ephemeral,
@@ -541,11 +554,13 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
+    const announcement = interaction.options.getBoolean("announcement") ?? false;
+    const targetChannelId = announcement ? ANNOUNCE_CHANNEL_ID : SEND_CHANNEL_ID;
     const mentionId = whoUser ? whoUser.id : "everyone";
 
     const result = addReminder({
       guild_id: interaction.guildId,
-      channel_id: SEND_CHANNEL_ID,
+      channel_id: targetChannelId,
       created_by: interaction.user.id,
       mention_id: mentionId,
       reminder,
@@ -565,7 +580,7 @@ client.on("interactionCreate", async (interaction) => {
     addToScheduler({
       id: Number(result.lastInsertRowid),
       guild_id: interaction.guildId,
-      channel_id: SEND_CHANNEL_ID,
+      channel_id: targetChannelId,
       created_by: interaction.user.id,
       mention_id: mentionId,
       reminder,
@@ -582,7 +597,8 @@ client.on("interactionCreate", async (interaction) => {
         `Mentions: ${mentionLabel}`,
         `Recurring: ${recurring ? "yes" : "no"}`,
         `Bomb: ${bomb ? "yes" : "no"}`,
-        `Sending in: <#${SEND_CHANNEL_ID}>`,
+        `Announcement: ${announcement ? "yes" : "no"}`,
+        `Sending in: <#${targetChannelId}>`,
       ].join("\n"),
       ...(announce ? {} : { flags: MessageFlags.Ephemeral }),
     });
@@ -598,8 +614,6 @@ async function fireNextReminders() {
   pruneDeletedReminders();
 
   try {
-    const channel = await fetchSendChannel();
-
     while (true) {
       pruneDeletedReminders();
 
@@ -617,11 +631,17 @@ async function fireNextReminders() {
       }
 
       try {
+        const channel = await fetchChannel(row.channel_id);
         const mention = formatMention(row.mention_id);
+        const isAnnouncement = row.channel_id === ANNOUNCE_CHANNEL_ID;
         const times = row.bomb ? 5 : 1;
 
         for (let i = 0; i < times; i++) {
-          await sendReminderMessage(channel, row.reminder, mention);
+          if (isAnnouncement) {
+            await sendAnnouncementMessage(channel, row.reminder, mention, row.remind_at);
+          } else {
+            await sendReminderMessage(channel, row.reminder, mention);
+          }
         }
 
         if (row.recurring) {
@@ -652,18 +672,31 @@ async function fireNextReminders() {
 
 client.once("clientReady", async () => {
   console.log(`[remind-bot] Online as ${client.user.tag}`);
+  // Load reminders FIRST — time-sensitive, no network needed
+  const startupReminders = getAllActiveReminders();
+  console.log(`[scheduler] Loaded ${startupReminders.length} reminder(s) from DB on startup`);
+  for (const reminder of startupReminders) {
+    reminderHeap.push(reminder);
+  }
+  scheduleNextReminder();
+
+  // Periodic catch-up for Android Doze / system sleep.
+  // Node.js setTimeout uses CLOCK_MONOTONIC which pauses when the OS
+  // throttles the process. This interval detects overdue reminders
+  // within 60s of resuming.
+  setInterval(() => {
+    const top = reminderHeap.peek();
+    if (top && top.remind_at <= Date.now() && schedulerTimer !== null) {
+      console.log(`[scheduler] Catch-up: reminder ID=${top.id} is overdue, rescheduling`);
+      scheduleNextReminder();
+    }
+  }, 60_000);
+
+  // Register commands AFTER — needs network, can be slow on mobile data
   try {
     await registerCommands();
-    const startupReminders = getAllActiveReminders();
-    console.log(`[scheduler] Loaded ${startupReminders.length} reminder(s) from DB on startup`);
-    for (const reminder of startupReminders) {
-      reminderHeap.push(reminder);
-    }
-    scheduleNextReminder();
   } catch (err) {
-    console.error("[remind-bot] Startup failed:", err);
-    client.destroy();
-    process.exit(1);
+    console.error("[remind-bot] Command registration failed:", err);
   }
 });
 

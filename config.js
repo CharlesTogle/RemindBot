@@ -16,6 +16,7 @@ export const COMMAND_GUILD_IDS = required("COMMAND_GUILD_IDS")
   .map((s) => s.trim())
   .filter(Boolean);
 export const SEND_CHANNEL_ID = required("SEND_CHANNEL_ID");
+export const ANNOUNCE_CHANNEL_ID = required("ANNOUNCE_CHANNEL_ID");
 export const PRIVILEGED_VIEWER_ID = required("PRIVILEGED_VIEWER_ID");
 
 export const TIMEZONE = "Asia/Manila";
